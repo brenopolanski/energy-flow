@@ -1,4 +1,4 @@
-# EnergyFlow
+# :zap: EnergyFlow
 
 <p align="center">
   <img src="preview/banner.png" alt="EnergyFlow" />
@@ -18,15 +18,16 @@ EnergyFlow accepts an instantaneous power reading, estimates how that power spli
 
 The problem it demonstrates is accepting work over HTTP without waiting for it to finish. Ingestion validates the reading and publishes a task. RabbitMQ holds the message. A Celery worker disaggregates it and writes PostgreSQL. A separate API reads the stored split. The stack is Python, FastAPI, Pydantic, Celery, RabbitMQ, PostgreSQL, asyncpg, and Docker Compose.
 
-This is an educational project, not a production energy-management system. The services, the failure behavior, and the local Compose runtime are there to be read and run.
+<!--idoc:ignore:start-->
 
-## Project Status
-
+> [!IMPORTANT]
 > **Educational / portfolio project**
 >
 > EnergyFlow is a small distributed backend for exploring asynchronous processing, messaging, reliability, testing, observability, and service boundaries.
 >
 > It is not a production energy-management system.
+
+<!--idoc:ignore:end-->
 
 ## Contents
 
