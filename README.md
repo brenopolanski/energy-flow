@@ -1,7 +1,7 @@
 # EnergyFlow
 
 <p align="center">
-  <img src="preview/banner.png" alt="EnergyFlow banner: sensor data processed asynchronously with FastAPI, Celery, RabbitMQ, PostgreSQL, and Docker" />
+  <img src="preview/banner.png" alt="EnergyFlow" />
 </p>
 
 <p align="center">
@@ -16,7 +16,9 @@
 
 EnergyFlow accepts an instantaneous power reading, estimates how that power splits across a few fixed appliance loads, and stores the result for later lookup.
 
-A client posts the reading to a FastAPI service and receives `202 Accepted` as soon as the task is published. Celery and RabbitMQ carry the work to a background worker. The worker writes PostgreSQL. A second FastAPI service reads the stored split. Docker Compose runs the three application services, RabbitMQ, and PostgreSQL together.
+The problem it demonstrates is accepting work over HTTP without waiting for it to finish. Ingestion validates the reading and publishes a task. RabbitMQ holds the message. A Celery worker disaggregates it and writes PostgreSQL. A separate API reads the stored split. The stack is Python, FastAPI, Pydantic, Celery, RabbitMQ, PostgreSQL, asyncpg, and Docker Compose.
+
+This is an educational project, not a production energy-management system. The services, the failure behavior, and the local Compose runtime are there to be read and run.
 
 ## Project Status
 
@@ -84,19 +86,19 @@ The four parts always sum to the measured total. The model is a deterministic su
 
 ```mermaid
 flowchart LR
-    Client[Sensor / Client]
-    Ingestion[Ingestion Service<br/>FastAPI :8001]
-    Broker[(RabbitMQ<br/>queue energyflow.tasks)]
-    Worker[Processing Service<br/>Celery worker]
-    Database[(PostgreSQL<br/>database energyflow)]
-    Results[Results Service<br/>FastAPI :8003]
+    Client[Sensor Simulator / Client]
+    Ingestion[ingestion-service<br/>FastAPI :8001]
+    Broker[(RabbitMQ<br/>energyflow.tasks)]
+    Worker[processing-service<br/>Celery worker]
+    Database[(PostgreSQL)]
+    Results[results-service<br/>FastAPI :8003]
 
     Client -->|POST /readings| Ingestion
-    Ingestion -->|task energyflow.readings.process| Broker
+    Ingestion -->|publish Celery task| Broker
     Broker -->|deliver task| Worker
-    Worker -->|write readings and results| Database
+    Worker -->|write| Database
     Client -->|GET /results/id| Results
-    Results -->|read join| Database
+    Results -->|read| Database
 ```
 
 | Service    | Responsibility                                                   |
@@ -107,9 +109,11 @@ flowchart LR
 | PostgreSQL | Store the reading and the appliance split.                       |
 | Results    | Return the stored split for one reading id.                      |
 
-Ingestion does not write to PostgreSQL and does not disaggregate. Processing does not accept sensor HTTP calls. Results does not publish. Processing and results share one database: processing creates and writes the tables, results only reads them.
+- **ingestion-service** accepts the reading, validates it, generates the id, publishes, and returns `202`. It does not disaggregate and it does not write PostgreSQL.
+- **processing-service** consumes the task, runs disaggregation, and persists the reading and the split. Retries and idempotency live here. It does not accept sensor HTTP calls.
+- **results-service** reads a completed row. It does not disaggregate and it does not publish.
 
-The sensor simulator is a client. It posts to ingestion. It does not write SQL.
+Processing and results share one database: processing creates and writes the tables, results only reads them. The sensor simulator is a client of ingestion. It posts HTTP. It does not write SQL. With `--results-url` it also polls results.
 
 ## Asynchronous Request Lifecycle
 
@@ -117,20 +121,24 @@ The sensor simulator is a client. It posts to ingestion. It does not write SQL.
 
 ```text
 POST /readings
-      ↓
+        ↓
+FastAPI validates the reading
+        ↓
+Ingestion publishes the task
+        ↓
 202 Accepted
-      ↓
-RabbitMQ  energyflow.tasks
-      ↓
+        ↓
+RabbitMQ
+        ↓
 Celery worker
-      ↓
+        ↓
 Disaggregation
-      ↓
+        ↓
 PostgreSQL
-      ↓
+        ↓
 GET /results/{reading_id}
-      ↓
-200 OK
+        ↓
+404 until the row exists, then 200 OK
 ```
 
 ```mermaid
@@ -178,22 +186,26 @@ The project exists to make a few backend problems concrete in one runnable syste
 - structured logs, correlation ids, and application metrics
 - a Docker Compose environment where those interactions can be inspected
 
+It was built in stages: domain models, validation, async I/O, PostgreSQL, a queue, Celery workers, service boundaries, then a Compose runtime with logs and metrics. The list of what that covers is in [What This Project Demonstrates](#what-this-project-demonstrates).
+
 The point is the trade-off, not a claim that this shape is the right one for every system.
 
 ## Technology Stack
 
-| Area            | Technology                                           |
-| --------------- | ---------------------------------------------------- |
-| Language        | Python 3.12+                                         |
-| API             | FastAPI, Uvicorn                                     |
-| Validation      | Pydantic v2                                          |
-| Task processing | Celery                                               |
-| Message broker  | RabbitMQ 4                                           |
-| Database        | PostgreSQL 16                                        |
-| Database driver | asyncpg                                              |
-| Observability   | prometheus-client text metrics, structured JSON logs |
-| Containers      | Docker Compose                                       |
-| Testing         | pytest, pytest-asyncio                               |
+| Area            | Technology                   | Role in this system                                                                                                      |
+| --------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Language        | Python 3.12+                 | Application code. `asyncio` waits on publish and on the database. Disaggregation stays synchronous and runs in a thread. |
+| API             | FastAPI, Uvicorn             | HTTP services. Request validation happens before the handler.                                                            |
+| Validation      | Pydantic v2                  | Reading, event, and disaggregation models.                                                                               |
+| Task processing | Celery                       | Background execution, retries, and acknowledgements.                                                                     |
+| Message broker  | RabbitMQ 4                   | Holds `energyflow.tasks` between `202` and the worker.                                                                   |
+| Database        | PostgreSQL 16                | Durable readings and splits, with constraints.                                                                           |
+| Database driver | asyncpg                      | Async connection pools and queries.                                                                                      |
+| Observability   | prometheus-client, JSON logs | `/metrics` text and one JSON object per log line.                                                                        |
+| Containers      | Docker Compose               | Local runtime for the five processes.                                                                                    |
+| Testing         | pytest, pytest-asyncio       | Unit tests and PostgreSQL integration tests.                                                                             |
+
+Diagrams in this file are Mermaid. Mermaid is not a runtime dependency.
 
 There is no Prometheus server, Grafana, Redis, Kafka, or Kubernetes in this repository. `/metrics` is read directly.
 
@@ -214,6 +226,8 @@ Inside the Compose network the database host is `postgres` on port 5432. The hos
 ## Quick Start
 
 ```bash
+git clone git@github.com:brenopolanski/energy-flow.git
+cd energy-flow
 docker compose up --build
 ```
 
@@ -239,21 +253,14 @@ Stop the stack with `docker compose down`. `docker compose down -v` also deletes
 
 ## Example
 
-`POST http://127.0.0.1:8001/readings`
+Submit a reading. The response is `202 Accepted`. The `id` is generated per request.
 
-```http
-POST /readings HTTP/1.1
-Content-Type: application/json
-X-Request-ID: demo-1
-
-{
-  "sensor_id": "sensor-001",
-  "timestamp": "2026-09-30T22:25:00Z",
-  "power_watts": 1600
-}
+```bash
+curl -sS -D - http://127.0.0.1:8001/readings \
+  -H 'content-type: application/json' \
+  -H 'X-Request-ID: demo-1' \
+  -d '{"sensor_id":"sensor-001","timestamp":"2026-09-30T22:25:00Z","power_watts":1600}'
 ```
-
-`202 Accepted` (the id is generated per request):
 
 ```json
 {
@@ -265,7 +272,26 @@ X-Request-ID: demo-1
 }
 ```
 
-After the worker commits, `GET http://127.0.0.1:8003/results/9cd62c05-a245-499e-aadc-de3f96ed4bab` returns the split: air conditioner 1500 W and other 100 W. Before that commit, the same URL returns `404`. Field-level rules and error cases are in [API](#api).
+After the worker commits, the same id returns the split: air conditioner 1500 W and other 100 W. Before that commit, the GET returns `404`.
+
+```bash
+curl -sS -D - http://127.0.0.1:8003/results/9cd62c05-a245-499e-aadc-de3f96ed4bab
+```
+
+```json
+{
+  "reading_id": "9cd62c05-a245-499e-aadc-de3f96ed4bab",
+  "sensor_id": "sensor-001",
+  "timestamp": "2026-09-30T22:25:00Z",
+  "power_watts": 1600.0,
+  "refrigerator_watts": 0.0,
+  "air_conditioner_watts": 1500.0,
+  "water_heater_watts": 0.0,
+  "other_watts": 100.0
+}
+```
+
+Field-level rules and error cases are in [API](#api).
 
 ## Service Details
 
@@ -554,7 +580,7 @@ Tests live under `tests/` and use pytest. Async tests are enabled in `pyproject.
 | `tests/test_observability.py` | JSON log fields and metric path labels                                                   |
 | `tests/test_simulator.py`     | Planned sensor ids and powers, without HTTP                                              |
 
-Integration tests are marked `integration` and need PostgreSQL. The default URL is `postgresql:///energyflow_test`, override with `ENERGYFLOW_DATABASE_URL`. They call the processing use case and repositories directly. They do not go through RabbitMQ.
+Unit tests do not need Docker, RabbitMQ, or PostgreSQL. Integration tests are marked `integration` and need a PostgreSQL that `ENERGYFLOW_DATABASE_URL` can reach. The default is `postgresql:///energyflow_test` on the local server, not the Compose database on port 5433, unless you point the variable there. They call the processing use case and repositories directly. They do not go through RabbitMQ.
 
 A `rabbitmq` marker is declared in `pyproject.toml`. No test currently uses it. Broker publishing in the API tests is an in-memory fake. There is no automated end-to-end test that starts RabbitMQ and a Celery worker.
 
@@ -727,6 +753,13 @@ There is no authentication on any endpoint.
 
 `POST http://127.0.0.1:8001/readings`
 
+```bash
+curl -sS -D - http://127.0.0.1:8001/readings \
+  -H 'content-type: application/json' \
+  -H 'X-Request-ID: demo-1' \
+  -d '{"sensor_id":"sensor-001","timestamp":"2026-09-30T22:25:00Z","power_watts":1600}'
+```
+
 ```http
 POST /readings HTTP/1.1
 Content-Type: application/json
@@ -758,6 +791,10 @@ The `id` is generated per request. The response header `X-Request-ID` is `demo-1
 ### Read a result
 
 `GET http://127.0.0.1:8003/results/{reading_id}`
+
+```bash
+curl -sS -D - http://127.0.0.1:8003/results/9cd62c05-a245-499e-aadc-de3f96ed4bab
+```
 
 After the worker stores the 1600 W example:
 
