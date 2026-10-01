@@ -2,7 +2,7 @@
 
 EnergyFlow is a toy distributed energy-data processing system. It is a learning project and will be built in small stages.
 
-The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, and a FastAPI application. `POST /readings` awaits the service. The appliance split itself stays synchronous. Later stages will add background jobs, messaging, and a database.
+The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, a FastAPI application, and a PostgreSQL repository for energy readings. The domain and the HTTP routes do not import the database driver. Later stages will add background jobs and messaging.
 
 ## Requirements
 
@@ -18,8 +18,16 @@ python -m pip install -e ".[dev]"
 
 ## Tests
 
+Unit tests do not need a database:
+
 ```bash
-pytest
+pytest -m "not integration"
+```
+
+Integration tests need PostgreSQL and `ENERGYFLOW_DATABASE_URL`. The default is `postgresql:///energyflow_test`.
+
+```bash
+pytest -m integration
 ```
 
 ## API

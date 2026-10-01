@@ -9,6 +9,7 @@ description = "A toy distributed energy-data processing system, built incrementa
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "asyncpg>=0.30",
     "fastapi>=0.115",
     "pydantic>=2",
     "uvicorn>=0.32",
@@ -18,11 +19,19 @@ dependencies = [
 dev = [
     "httpx2>=0.28",
     "pytest>=8",
+    "pytest-asyncio>=0.24",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+energyflow = ["persistence/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+    "integration: tests that need a running PostgreSQL",
+]
