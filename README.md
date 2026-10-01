@@ -2,7 +2,7 @@
 
 EnergyFlow is a toy distributed energy-data processing system. It is a learning project and will be built in small stages.
 
-The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, a FastAPI application, and a PostgreSQL repository for energy readings. The domain and the HTTP routes do not import the database driver. Later stages will add background jobs and messaging.
+The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, a FastAPI application, a PostgreSQL repository, and a RabbitMQ publisher/consumer for accepted readings. `POST /readings` publishes `energy_reading.accepted` after the reading is processed. Later stages will add background workers.
 
 ## Requirements
 
@@ -18,16 +18,28 @@ python -m pip install -e ".[dev]"
 
 ## Tests
 
-Unit tests do not need a database:
+Unit tests do not need PostgreSQL or RabbitMQ:
 
 ```bash
-pytest -m "not integration"
+pytest -m "not integration and not rabbitmq"
 ```
 
-Integration tests need PostgreSQL and `ENERGYFLOW_DATABASE_URL`. The default is `postgresql:///energyflow_test`.
+PostgreSQL integration tests use `ENERGYFLOW_DATABASE_URL`. The default is `postgresql:///energyflow_test`.
 
 ```bash
 pytest -m integration
+```
+
+RabbitMQ tests use `ENERGYFLOW_RABBITMQ_URL`. The default is `amqp://guest:guest@127.0.0.1/`.
+
+```bash
+pytest -m rabbitmq
+```
+
+The consumer listens on the `energy_readings` queue:
+
+```bash
+python -m energyflow.messaging
 ```
 
 ## API

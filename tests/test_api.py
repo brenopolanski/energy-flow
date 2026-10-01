@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from energyflow.api.app import create_app
+from energyflow.models import EnergyReading
 
 VALID_READING = {
     "sensor_id": "sensor-001",
@@ -10,9 +11,22 @@ VALID_READING = {
 }
 
 
+class RecordingPublisher:
+    def __init__(self) -> None:
+        self.readings: list[EnergyReading] = []
+
+    async def publish_reading_accepted(self, reading: EnergyReading) -> None:
+        self.readings.append(reading)
+
+
 @pytest.fixture
-def client() -> TestClient:
-    return TestClient(create_app())
+def publisher() -> RecordingPublisher:
+    return RecordingPublisher()
+
+
+@pytest.fixture
+def client(publisher: RecordingPublisher) -> TestClient:
+    return TestClient(create_app(publisher=publisher))
 
 
 def test_health(client: TestClient) -> None:
@@ -49,6 +63,7 @@ def test_health(client: TestClient) -> None:
 )
 def test_post_reading_returns_disaggregation(
     client: TestClient,
+    publisher: RecordingPublisher,
     power_watts: float,
     breakdown: dict[str, float],
 ) -> None:
@@ -62,6 +77,9 @@ def test_post_reading_returns_disaggregation(
     assert body["sensor_id"] == "sensor-001"
     assert body["timestamp"] == "2026-09-29T10:00:00Z"
     assert body["breakdown"] == breakdown
+    assert len(publisher.readings) == 1
+    assert publisher.readings[0].sensor_id == "sensor-001"
+    assert publisher.readings[0].power_watts == power_watts
 
 
 @pytest.mark.parametrize(
@@ -96,8 +114,10 @@ def test_post_reading_returns_disaggregation(
 )
 def test_post_reading_rejects_invalid_body(
     client: TestClient,
+    publisher: RecordingPublisher,
     payload: dict[str, object],
 ) -> None:
     response = client.post("/readings", json=payload)
 
     assert response.status_code == 422
+    assert publisher.readings == []

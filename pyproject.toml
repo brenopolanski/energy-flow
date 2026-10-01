@@ -9,6 +9,7 @@ description = "A toy distributed energy-data processing system, built incrementa
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aio-pika>=9",
     "asyncpg>=0.30",
     "fastapi>=0.115",
     "pydantic>=2",
@@ -34,4 +35,5 @@ pythonpath = ["src"]
 asyncio_mode = "auto"
 markers = [
     "integration: tests that need a running PostgreSQL",
+    "rabbitmq: tests that need a running RabbitMQ broker",
 ]

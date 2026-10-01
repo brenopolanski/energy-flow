@@ -5,8 +5,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel
 
-from energyflow.api.dependencies import get_disaggregation_service
+from energyflow.api.dependencies import get_disaggregation_service, get_reading_publisher
 from energyflow.disaggregation import DisaggregatedReading, EnergyDisaggregationService
+from energyflow.messaging.publisher import ReadingEventPublisher
 from energyflow.models import EnergyReading
 
 router = APIRouter()
@@ -15,6 +16,7 @@ DisaggregationService = Annotated[
     EnergyDisaggregationService,
     Depends(get_disaggregation_service),
 ]
+ReadingPublisher = Annotated[ReadingEventPublisher, Depends(get_reading_publisher)]
 
 
 class HealthResponse(BaseModel):
@@ -34,5 +36,8 @@ def health() -> HealthResponse:
 async def process_reading(
     reading: EnergyReading,
     service: DisaggregationService,
+    publisher: ReadingPublisher,
 ) -> DisaggregatedReading:
-    return await service.disaggregate(reading)
+    result = await service.disaggregate(reading)
+    await publisher.publish_reading_accepted(reading)
+    return result
