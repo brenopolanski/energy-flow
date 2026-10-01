@@ -51,6 +51,44 @@ def test_post_reading_publishes_an_accepted_event() -> None:
     assert isinstance(event.reading_id, UUID)
 
 
+def test_post_reading_carries_the_request_id() -> None:
+    publisher = MemoryPublisher()
+    client = TestClient(create_app(publisher=publisher))
+
+    response = client.post(
+        "/readings",
+        json=VALID_READING,
+        headers={"X-Request-ID": "req-123"},
+    )
+
+    assert response.status_code == 202
+    assert response.headers["x-request-id"] == "req-123"
+    assert publisher.events[0].correlation_id == "req-123"
+
+
+def test_post_reading_records_a_publish_metric() -> None:
+    publisher = MemoryPublisher()
+    client = TestClient(create_app(publisher=publisher))
+
+    before = client.get("/metrics")
+    posted = client.post("/readings", json=VALID_READING)
+    after = client.get("/metrics")
+
+    assert posted.status_code == 202
+    assert _counter(before.text, "energyflow_readings_published_total") + 1 == _counter(
+        after.text,
+        "energyflow_readings_published_total",
+    )
+    assert 'path="/readings"' in after.text
+
+
+def _counter(text: str, name: str) -> float:
+    for line in text.splitlines():
+        if line.startswith(name + " "):
+            return float(line.split()[-1])
+    return 0.0
+
+
 def test_post_reading_rejects_an_invalid_body_without_publishing() -> None:
     publisher = MemoryPublisher()
     client = TestClient(create_app(publisher=publisher))

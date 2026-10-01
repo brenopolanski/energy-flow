@@ -9,12 +9,17 @@ RabbitMQ is the broker. Tasks arrive on ``energyflow.tasks`` under the name
 import asyncio
 import logging
 import os
+import time
 
 import asyncpg
 from celery import Celery
 from celery.app import trace as celery_trace
-from celery.signals import worker_process_init
+from celery.signals import setup_logging, worker_process_init, worker_ready
 from pydantic import ValidationError
+
+from energyflow_observability.http import serve_worker_endpoints
+from energyflow_observability.logging import configure_logging
+from energyflow_observability.metrics import TASK_DURATION, TASKS
 
 from energyflow_contracts.events import PROCESS_READING_TASK, TASK_QUEUE, ReadingAccepted
 from processing_service.domain import EnergyDisaggregationService
@@ -79,11 +84,30 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     broker_connection_retry_on_startup=True,
+    worker_hijack_root_logger=False,
     # RabbitMQ 4 rejects a transient queue that is not exclusive. Celery's
     # control mailbox is that kind of queue unless this is enabled.
     control_queue_exclusive=True,
     event_queue_exclusive=True,
 )
+
+
+@setup_logging.connect
+def _configure_worker_logging(**_kwargs: object) -> None:
+    configure_logging("processing")
+
+
+@worker_ready.connect
+def _on_worker_ready(**_kwargs: object) -> None:
+    """Create the tables, then expose /health and /metrics."""
+    asyncio.run(_prepare_database())
+    serve_worker_endpoints()
+    logger.info("processing worker ready")
+
+
+async def _prepare_database() -> None:
+    pool = await connect(database_url())
+    await pool.close()
 
 
 @worker_process_init.connect
@@ -168,8 +192,22 @@ async def _process_once(event: ReadingAccepted) -> StoredDisaggregation:
 )
 def process_reading_accepted(self, payload: dict[str, object]) -> str:
     """Disaggregate one accepted reading and store the split."""
+    started = time.perf_counter()
+    outcome = "failure"
+    reading_id = _reading_label(payload)
+    correlation_id = _correlation_id(payload)
     try:
         result = run_reading_task(payload)
+        outcome = "success"
+        logger.info(
+            "processed reading",
+            extra={
+                "reading_id": reading_id,
+                "correlation_id": correlation_id,
+                "outcome": outcome,
+            },
+        )
+        return str(result.reading_id)
     except Exception as exc:
         action, countdown = classify_failure(
             exc,
@@ -177,20 +215,37 @@ def process_reading_accepted(self, payload: dict[str, object]) -> str:
             self.max_retries,
         )
         if action == "retry":
+            outcome = "retry"
             logger.warning(
-                "Retrying reading %s after %s in %ss (retry %s of %s)",
-                _reading_label(payload),
-                type(exc).__name__,
-                countdown,
-                self.request.retries + 1,
-                self.max_retries,
+                "retrying reading",
+                extra={
+                    "reading_id": reading_id,
+                    "correlation_id": correlation_id,
+                    "outcome": outcome,
+                },
             )
             raise self.retry(exc=exc, countdown=countdown) from exc
-        logger.error("Reading %s failed permanently: %s", _reading_label(payload), exc)
+        logger.error(
+            "reading failed permanently",
+            extra={
+                "reading_id": reading_id,
+                "correlation_id": correlation_id,
+                "outcome": "failure",
+            },
+        )
         raise
-    return str(result.reading_id)
+    finally:
+        TASKS.labels(outcome=outcome).inc()
+        TASK_DURATION.observe(time.perf_counter() - started)
 
 
 def _reading_label(payload: dict[str, object]) -> str:
     reading_id = payload.get("reading_id")
     return str(reading_id) if reading_id is not None else "<missing id>"
+
+
+def _correlation_id(payload: dict[str, object]) -> str | None:
+    value = payload.get("correlation_id")
+    if isinstance(value, str) and value:
+        return value
+    return None

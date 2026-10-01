@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: energyflow
+      POSTGRES_PASSWORD: energyflow
+      POSTGRES_DB: energyflow
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U energyflow -d energyflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - energyflow-postgres:/var/lib/postgresql/data
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: energyflow
+      RABBITMQ_DEFAULT_PASS: energyflow
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  ingestion-service:
+    build:
+      context: .
+      dockerfile: docker/ingestion.Dockerfile
+    environment:
+      ENERGYFLOW_RABBITMQ_URL: amqp://energyflow:energyflow@rabbitmq:5672/
+    ports:
+      - "8001:8001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  processing-service:
+    build:
+      context: .
+      dockerfile: docker/processing.Dockerfile
+    environment:
+      ENERGYFLOW_RABBITMQ_URL: amqp://energyflow:energyflow@rabbitmq:5672/
+      ENERGYFLOW_DATABASE_URL: postgresql://energyflow:energyflow@postgres:5432/energyflow
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
+      ENERGYFLOW_METRICS_PORT: "9100"
+    ports:
+      - "9100:9100"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 25s
+
+  results-service:
+    build:
+      context: .
+      dockerfile: docker/results.Dockerfile
+    environment:
+      ENERGYFLOW_DATABASE_URL: postgresql://energyflow:energyflow@postgres:5432/energyflow
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      processing-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  energyflow-postgres:

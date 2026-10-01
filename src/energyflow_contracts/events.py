@@ -24,14 +24,21 @@ class ReadingAccepted(BaseModel):
     sensor_id: SensorId
     timestamp: AwareDatetime
     power_watts: Annotated[float, Field(ge=0)]
+    correlation_id: str | None = None
 
     @classmethod
-    def from_reading(cls, reading_id: UUID, reading: EnergyReading) -> Self:
+    def from_reading(
+        cls,
+        reading_id: UUID,
+        reading: EnergyReading,
+        correlation_id: str | None = None,
+    ) -> Self:
         return cls(
             reading_id=reading_id,
             sensor_id=reading.sensor_id,
             timestamp=reading.timestamp,
             power_watts=reading.power_watts,
+            correlation_id=correlation_id,
         )
 
     def to_message(self) -> dict[str, object]:

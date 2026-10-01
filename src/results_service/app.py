@@ -1,5 +1,6 @@
 """HTTP application for the results service."""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
@@ -7,8 +8,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel
 
+from energyflow_observability.http import install_observability
+from energyflow_observability.metrics import RESULT_LOOKUPS
 from results_service.postgres import PostgresResultReader, connect, database_url
 from results_service.reading import ProcessedReading, ResultReader
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -36,6 +41,12 @@ def health() -> HealthResponse:
 )
 async def get_result(reading_id: UUID, reader: Reader) -> ProcessedReading:
     found = await reader.find(reading_id)
+    outcome = "hit" if found is not None else "miss"
+    RESULT_LOOKUPS.labels(outcome=outcome).inc()
+    logger.info(
+        "result lookup",
+        extra={"reading_id": str(reading_id), "outcome": outcome},
+    )
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return found
@@ -59,6 +70,7 @@ def create_app(reader: ResultReader | None = None) -> FastAPI:
         lifespan=None if reader is not None else lifespan,
     )
     app.include_router(router)
+    install_observability(app, "results")
     if reader is not None:
         app.dependency_overrides[get_reader] = lambda: reader
     return app

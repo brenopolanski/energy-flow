@@ -96,8 +96,13 @@ async def apply_schema(pool: asyncpg.Pool) -> None:
 
 
 async def connect(database_url: str) -> asyncpg.Pool:
-    """Open a pool and ensure the schema exists."""
-    pool = await asyncpg.create_pool(database_url)
+    """Open a pool and ensure the schema exists.
+
+    A worker process opens this pool for one task and then closes it.
+    The pool stays at one or two connections so several workers do not
+    exhaust PostgreSQL's client limit.
+    """
+    pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
     try:
         await apply_schema(pool)
     except Exception:

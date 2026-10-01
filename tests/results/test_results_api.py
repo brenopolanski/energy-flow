@@ -22,6 +22,15 @@ class MemoryReader:
         return self.found
 
 
+def test_health_returns_the_request_id() -> None:
+    client = TestClient(create_app(reader=MemoryReader(None)))
+
+    response = client.get("/health", headers={"X-Request-ID": "req-results"})
+
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "req-results"
+
+
 def test_health() -> None:
     response = TestClient(create_app(reader=MemoryReader(None))).get("/health")
 
