@@ -89,13 +89,13 @@ results-service    --sql-->   postgres:5432
 
 From your machine the published ports are:
 
-| Process | URL |
-| --- | --- |
-| Ingestion | http://127.0.0.1:8001 |
-| Results | http://127.0.0.1:8003 |
-| Worker health and metrics | http://127.0.0.1:9100 |
-| RabbitMQ management | http://127.0.0.1:15672 (`energyflow` / `energyflow`) |
-| PostgreSQL | `127.0.0.1:5433` (`energyflow` / `energyflow`, database `energyflow`) |
+| Process                   | URL                                                                   |
+| ------------------------- | --------------------------------------------------------------------- |
+| Ingestion                 | http://127.0.0.1:8001                                                 |
+| Results                   | http://127.0.0.1:8003                                                 |
+| Worker health and metrics | http://127.0.0.1:9100                                                 |
+| RabbitMQ management       | http://127.0.0.1:15672 (`energyflow` / `energyflow`)                  |
+| PostgreSQL                | `127.0.0.1:5433` (`energyflow` / `energyflow`, database `energyflow`) |
 
 PostgreSQL is published on 5433 so it does not collide with a database already listening on 5432. Inside the network the host is still `postgres` and the port is 5432.
 
