@@ -1,10 +1,84 @@
 # EnergyFlow
 
-EnergyFlow accepts instantaneous power readings, estimates which appliances produced that power, and stores the result for later lookup.
+<p align="center">
+  <img src="preview/banner.png" alt="EnergyFlow banner: sensor data processed asynchronously with FastAPI, Celery, RabbitMQ, PostgreSQL, and Docker" />
+</p>
 
-The work is split across three services. Ingestion validates a reading and publishes it. A Celery worker consumes the message, runs the estimate, and writes PostgreSQL. A separate API reads the stored result. RabbitMQ sits between the HTTP accept and the background job, so the client receives a response before processing finishes.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.12+" />
+  <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white" alt="Celery" />
+  <img src="https://img.shields.io/badge/RabbitMQ-FF6600?style=flat-square&logo=rabbitmq&logoColor=white" alt="RabbitMQ" />
+  <img src="https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/pytest-0A9EDC?style=flat-square&logo=pytest&logoColor=white" alt="pytest" />
+</p>
 
-The stack is Python, FastAPI, Pydantic, Celery, RabbitMQ, PostgreSQL, and Docker Compose. Together they show asynchronous processing, event-driven communication, service boundaries, retries, idempotency, observability, connection pooling, and eventual consistency.
+EnergyFlow accepts an instantaneous power reading, estimates how that power splits across a few fixed appliance loads, and stores the result for later lookup.
+
+A client posts the reading to a FastAPI service and receives `202 Accepted` as soon as the task is published. Celery and RabbitMQ carry the work to a background worker. The worker writes PostgreSQL. A second FastAPI service reads the stored split. Docker Compose runs the three application services, RabbitMQ, and PostgreSQL together.
+
+## Project Status
+
+> **Educational / portfolio project**
+>
+> EnergyFlow is a small distributed backend for exploring asynchronous processing, messaging, reliability, testing, observability, and service boundaries.
+>
+> It is not a production energy-management system.
+
+## Contents
+
+- [What is Energy Disaggregation?](#what-is-energy-disaggregation)
+- [Architecture](#architecture)
+- [Asynchronous Request Lifecycle](#asynchronous-request-lifecycle)
+- [Why This Project?](#why-this-project)
+- [Technology Stack](#technology-stack)
+- [Services](#services)
+- [Quick Start](#quick-start)
+- [Example](#example)
+- [Service Details](#service-details)
+- [Messaging](#messaging)
+- [Reliability](#reliability)
+- [Idempotency](#idempotency)
+- [Data Storage](#data-storage)
+- [Scaling](#scaling)
+- [Observability](#observability)
+- [Request Correlation](#request-correlation)
+- [Eventual Consistency](#eventual-consistency)
+- [Testing](#testing)
+- [Load Testing](#load-testing)
+- [Design Decisions](#design-decisions)
+- [Trade-offs and Limitations](#trade-offs-and-limitations)
+- [What This Project Demonstrates](#what-this-project-demonstrates)
+- [Project Structure](#project-structure)
+- [API](#api)
+- [Development](#development)
+- [Shutdown](#shutdown)
+
+## What is Energy Disaggregation?
+
+A meter reports one number: total power at an instant. Disaggregation estimates how that total can be attributed to individual loads.
+
+This project uses three fixed on/off signatures: refrigerator 150 W, air conditioner 1500 W, and water heater 4500 W. The worker keeps the largest combination that does not exceed the reading. Whatever is left is `other`. A 1600 W reading becomes:
+
+```text
+Meter reading
+     │
+     │ 1600 W
+     ▼
+┌───────────────────────┐
+│ Energy Disaggregation │
+└───────────────────────┘
+     │
+     ├── Refrigerator       0 W
+     ├── Air Conditioner 1500 W
+     ├── Water Heater       0 W
+     └── Other             100 W
+                         ───────
+                          1600 W
+```
+
+The four parts always sum to the measured total. The model is a deterministic subset search, not a learned signature from a real meter.
 
 ## Architecture
 
@@ -25,62 +99,21 @@ flowchart LR
     Results -->|read join| Database
 ```
 
-| Service | Responsibility |
-| --- | --- |
-| Ingestion | Validate the HTTP body, assign a reading id, publish one Celery task. |
-| RabbitMQ | Hold `energyflow.tasks` until a worker takes the message. |
-| Processing | Run disaggregation and insert both tables. |
-| PostgreSQL | Store the reading and the appliance split. |
-| Results | Return the stored split for one reading id. |
+| Service    | Responsibility                                                   |
+| ---------- | ---------------------------------------------------------------- |
+| Ingestion  | Validate the body, assign a reading id, publish one Celery task. |
+| RabbitMQ   | Hold `energyflow.tasks` until a worker takes the message.        |
+| Processing | Disaggregate and insert both tables.                             |
+| PostgreSQL | Store the reading and the appliance split.                       |
+| Results    | Return the stored split for one reading id.                      |
 
 Ingestion does not write to PostgreSQL and does not disaggregate. Processing does not accept sensor HTTP calls. Results does not publish. Processing and results share one database: processing creates and writes the tables, results only reads them.
 
 The sensor simulator is a client. It posts to ingestion. It does not write SQL.
 
-## Request Flow
+## Asynchronous Request Lifecycle
 
-```text
-Client
-  → Ingestion Service
-  → Pydantic validation
-  → RabbitMQ
-  → Celery worker
-  → Disaggregation
-  → PostgreSQL
-  → Results Service
-```
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant I as Ingestion :8001
-    participant Q as RabbitMQ
-    participant W as Celery worker
-    participant DB as PostgreSQL
-    participant R as Results :8003
-
-    C->>I: POST /readings
-    I->>I: Validate EnergyReading
-    I->>Q: send_task energyflow.readings.process
-    I-->>C: 202 Accepted with reading id
-
-    Q->>W: Deliver ReadingAccepted
-    W->>W: Disaggregate
-    W->>DB: Insert energy_readings and disaggregation_results
-
-    C->>R: GET /results/{reading_id}
-    R->>DB: Join on reading id
-    DB-->>R: Row or no row
-    R-->>C: 200 OK or 404
-```
-
-Validation of the HTTP body is synchronous. Publishing is synchronous from the client's point of view: the handler waits until `send_task` returns, then responds. Disaggregation and the inserts happen later, on the worker. That is why `POST /readings` can return while `GET /results/{id}` still has nothing to read.
-
-`send_task` itself is a blocking Celery call. The ingestion handler runs it in a worker thread so it does not stall the FastAPI event loop.
-
-## Asynchronous Processing
-
-`200 OK` would mean the requested work is finished and the body is the result. `202 Accepted` means the reading was validated and the task was published. The response contains the new id, the sensor, the timestamp, the measured watts, and `"status": "accepted"`. It does not contain the appliance split.
+`200 OK` would mean the requested work is finished. `202 Accepted` means the reading was validated and the task was published. The response carries the new id and the measured watts. It does not carry the appliance split.
 
 ```text
 POST /readings
@@ -91,6 +124,8 @@ RabbitMQ  energyflow.tasks
       ↓
 Celery worker
       ↓
+Disaggregation
+      ↓
 PostgreSQL
       ↓
 GET /results/{reading_id}
@@ -98,28 +133,141 @@ GET /results/{reading_id}
 200 OK
 ```
 
-Until the worker commits both rows, the same `GET` returns `404`. The results service has no "pending" status. A missing row and an unknown id produce the same response. An id that is not a UUID is rejected earlier, with `422`, by request parsing.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant I as Ingestion
+    participant Q as RabbitMQ
+    participant W as Worker
+    participant R as Results
+    participant DB as PostgreSQL
 
-A client that needs the split polls `GET /results/{reading_id}`, or follows the logs and metrics until the task succeeds.
+    C->>I: POST /readings
+    I->>I: Validate EnergyReading
+    I->>Q: Publish energyflow.readings.process
+    I-->>C: 202 Accepted
+
+    C->>R: GET /results/id
+    R->>DB: Lookup
+    DB-->>R: No row
+    R-->>C: 404 Not Found
+
+    Q->>W: Deliver ReadingAccepted
+    W->>W: Disaggregate
+    W->>DB: Store reading and result
+
+    C->>R: GET /results/id
+    R->>DB: Lookup
+    DB-->>R: Row
+    R-->>C: 200 OK
+```
+
+The `404` in that sequence is what the results service returns when no row exists yet. The same status is returned for an id that was never accepted. There is no "pending" state. If the worker finishes before the first `GET`, that call is already `200`. An id that is not a UUID is rejected earlier, with `422`.
+
+Validation and publish are synchronous for the client: the handler waits until `send_task` returns, then responds `202`. `send_task` is a blocking Celery call, so ingestion runs it in a thread and does not stall the FastAPI event loop. Disaggregation and the inserts happen later, on the worker.
+
+## Why This Project?
+
+The project exists to make a few backend problems concrete in one runnable system:
+
+- an HTTP API that accepts work without waiting for it to finish
+- a message broker between that API and a Celery worker
+- retries, late acknowledgements, and idempotent writes
+- PostgreSQL as the system of record, including connection-pool limits
+- separate services that share a contract instead of importing each other
+- structured logs, correlation ids, and application metrics
+- a Docker Compose environment where those interactions can be inspected
+
+The point is the trade-off, not a claim that this shape is the right one for every system.
 
 ## Technology Stack
 
-| Component | Technology | Purpose |
-| --- | --- | --- |
-| Language | Python 3.12+ | Application code |
-| HTTP | FastAPI, Uvicorn | Ingestion and results APIs |
-| Validation | Pydantic v2 | Reading and event models |
-| Background jobs | Celery | Consume `energyflow.readings.process` |
-| Broker | RabbitMQ 4 | Queue `energyflow.tasks` |
-| Database | PostgreSQL 16 | Readings and disaggregation rows |
-| Database driver | asyncpg | Async pools and queries |
-| Metrics | prometheus-client | Text exposition on `/metrics` |
-| Containers | Docker Compose | Local orchestration |
-| Tests | pytest, pytest-asyncio | Unit and PostgreSQL integration tests |
+| Area            | Technology                                           |
+| --------------- | ---------------------------------------------------- |
+| Language        | Python 3.12+                                         |
+| API             | FastAPI, Uvicorn                                     |
+| Validation      | Pydantic v2                                          |
+| Task processing | Celery                                               |
+| Message broker  | RabbitMQ 4                                           |
+| Database        | PostgreSQL 16                                        |
+| Database driver | asyncpg                                              |
+| Observability   | prometheus-client text metrics, structured JSON logs |
+| Containers      | Docker Compose                                       |
+| Testing         | pytest, pytest-asyncio                               |
 
-There is no Prometheus server, Grafana, Redis, Kafka, or Kubernetes in this repository. Metrics are scraped by requesting `/metrics` directly.
+There is no Prometheus server, Grafana, Redis, Kafka, or Kubernetes in this repository. `/metrics` is read directly.
 
 ## Services
+
+Ports below are the ones Compose publishes on the host.
+
+| Service            | Responsibility                                                   | Host port   |
+| ------------------ | ---------------------------------------------------------------- | ----------- |
+| ingestion-service  | Validate readings and publish tasks                              | 8001        |
+| processing-service | Celery worker. Health and metrics only; tasks use RabbitMQ       | 9100        |
+| results-service    | Read processed results                                           | 8003        |
+| RabbitMQ           | AMQP broker and management UI                                    | 5672, 15672 |
+| PostgreSQL         | Persistent storage. Host port 5433 maps to 5432 in the container | 5433        |
+
+Inside the Compose network the database host is `postgres` on port 5432. The host port is 5433 so it does not collide with a PostgreSQL already listening on 5432.
+
+## Quick Start
+
+```bash
+docker compose up --build
+```
+
+Compose builds the three application images and pulls `postgres:16-alpine` and `rabbitmq:4-management`. Service names are DNS names on the Compose network. Inside a container, `localhost` is that container, so the apps use `rabbitmq` and `postgres`.
+
+| From the host             | Address                |
+| ------------------------- | ---------------------- |
+| Ingestion                 | http://127.0.0.1:8001  |
+| Results                   | http://127.0.0.1:8003  |
+| Worker health and metrics | http://127.0.0.1:9100  |
+| RabbitMQ management       | http://127.0.0.1:15672 |
+| PostgreSQL                | `127.0.0.1:5433`       |
+
+RabbitMQ and PostgreSQL credentials are `energyflow` / `energyflow`. The database name is `energyflow`. RabbitMQ's `guest` user only works from inside the broker container, so Compose does not use it.
+
+```bash
+curl -s http://127.0.0.1:8001/health
+curl -s http://127.0.0.1:8003/health
+curl -s http://127.0.0.1:9100/health
+```
+
+Stop the stack with `docker compose down`. `docker compose down -v` also deletes the PostgreSQL volume. Details are in [Shutdown](#shutdown). A manual run without Compose is in [Development](#development).
+
+## Example
+
+`POST http://127.0.0.1:8001/readings`
+
+```http
+POST /readings HTTP/1.1
+Content-Type: application/json
+X-Request-ID: demo-1
+
+{
+  "sensor_id": "sensor-001",
+  "timestamp": "2026-09-30T22:25:00Z",
+  "power_watts": 1600
+}
+```
+
+`202 Accepted` (the id is generated per request):
+
+```json
+{
+  "id": "9cd62c05-a245-499e-aadc-de3f96ed4bab",
+  "sensor_id": "sensor-001",
+  "timestamp": "2026-09-30T22:25:00Z",
+  "power_watts": 1600.0,
+  "status": "accepted"
+}
+```
+
+After the worker commits, `GET http://127.0.0.1:8003/results/9cd62c05-a245-499e-aadc-de3f96ed4bab` returns the split: air conditioner 1500 W and other 100 W. Before that commit, the same URL returns `404`. Field-level rules and error cases are in [API](#api).
+
+## Service Details
 
 ### Ingestion Service
 
@@ -135,9 +283,7 @@ Unknown JSON fields are rejected. A negative power returns `422` and nothing is 
 
 On success the service generates a UUID, copies the current `X-Request-ID` onto the event as `correlation_id`, and publishes the full reading. It does not disaggregate, and it does not insert a row. If publish raises, the client does not receive `202`.
 
-`GET /health` returns `{"status":"ok"}`. It does not check RabbitMQ.
-
-`GET /metrics` returns Prometheus text for this process.
+`GET /health` returns `{"status":"ok"}`. It does not check RabbitMQ. `GET /metrics` returns Prometheus text for this process.
 
 ### Processing Service
 
@@ -155,7 +301,7 @@ On startup the worker applies the schema once, then serves `GET /health` and `GE
 
 A second, smaller app, `processing_service.health:app`, only exposes `GET /health` and does not run tasks. It is for a manual process on port 8002. Compose does not start it.
 
-Disaggregation treats three appliances as fixed on/off loads: refrigerator 150 W, air conditioner 1500 W, water heater 4500 W. `split_power` tries every non-empty subset, keeps the largest subset that does not exceed the meter reading, and assigns the remainder to `other`. Ties keep the lowest bitmask. The four parts sum to the measured total. A 1600 W reading becomes air conditioner 1500 W and other 100 W.
+`split_power` tries every non-empty subset of the three appliances, keeps the largest subset that does not exceed the meter reading, and assigns the remainder to `other`. Ties keep the lowest bitmask.
 
 ### Results Service
 
@@ -163,26 +309,24 @@ FastAPI application `results_service.app:app`, published on port **8003**.
 
 `GET /results/{reading_id}` loads one join of `disaggregation_results` and `energy_readings`. A row returns `200`. No row returns `404`. The service does not accept readings, publish tasks, or disaggregate.
 
-It opens one pool at startup and does not create tables. Compose starts it after the worker is healthy so the schema already exists.
-
-`GET /health` returns `{"status":"ok"}` without querying PostgreSQL.
+It opens one pool at startup and does not create tables. Compose starts it after the worker is healthy so the schema already exists. `GET /health` returns `{"status":"ok"}` without querying PostgreSQL.
 
 ### Sensor Simulator
 
 `python -m sensor_simulator` posts synthetic readings to ingestion. Sensor ids are `sensor-00001` upward. Power is deterministic from the sensor index and the reading sequence. The tool prints how many requests returned each status, plus p50, p95, and max latency of those POSTs.
 
-`--results-url` polls one accepted id until results returns `200` or the wait times out. The simulator never inserts into PostgreSQL itself.
+`--results-url` polls one accepted id until results returns `200` or the wait times out. The simulator never inserts into PostgreSQL itself. Commands are in [Load Testing](#load-testing).
 
 ## Messaging
 
 RabbitMQ is the broker: the server that accepts and stores messages. Celery is the client and the worker framework. Ingestion uses Celery only to call `send_task`. Processing uses Celery to register and execute the task. Neither service imports the other's application code. They share the task name, the queue name, and the `ReadingAccepted` model in `energyflow_contracts`.
 
-| Name | Value |
-| --- | --- |
+| Name                  | Value                                         |
+| --------------------- | --------------------------------------------- |
 | Broker URL in Compose | `amqp://energyflow:energyflow@rabbitmq:5672/` |
-| Queue | `energyflow.tasks` |
-| Task | `energyflow.readings.process` |
-| Payload | One `ReadingAccepted` object |
+| Queue                 | `energyflow.tasks`                            |
+| Task                  | `energyflow.readings.process`                 |
+| Payload               | One `ReadingAccepted` object                  |
 
 The worker sets `acks_late` and `reject_on_worker_lost`. The message stays unacknowledged until the task function finishes. If the worker process is lost first, the broker can redeliver it. `task_ignore_result` is on: the return value is not stored in a Celery result backend. The split lives in PostgreSQL.
 
@@ -202,7 +346,7 @@ Retryable failures include connection and timeout errors, asyncpg connection err
 
 **The worker process dies mid-task.**
 
-Late ack plus `reject_on_worker_lost` leaves the message available for another attempt. The database, not the broker, decides whether that attempt inserts again. See Idempotency.
+Late ack plus `reject_on_worker_lost` leaves the message available for another attempt. The database, not the broker, decides whether that attempt inserts again. See [Idempotency](#idempotency).
 
 **Publish itself fails.**
 
@@ -236,22 +380,22 @@ Processing applies `schema.sql` on worker startup and again on every task attemp
 
 ### `energy_readings`
 
-| Column | Notes |
-| --- | --- |
-| `id` | UUID primary key. The worker inserts the id from the message. |
-| `sensor_id` | Same pattern and length as the API. |
-| `recorded_at` | `timestamptz` |
+| Column        | Notes                                                                      |
+| ------------- | -------------------------------------------------------------------------- |
+| `id`          | UUID primary key. The worker inserts the id from the message.              |
+| `sensor_id`   | Same pattern and length as the API.                                        |
+| `recorded_at` | `timestamptz`                                                              |
 | `power_watts` | Non-negative and finite, including a check that rejects NaN and infinities |
 
 Index: `(sensor_id, recorded_at)`.
 
 ### `disaggregation_results`
 
-| Column | Notes |
-| --- | --- |
-| `reading_id` | Primary key and foreign key to `energy_readings.id`, `ON DELETE CASCADE` |
-| `total_power_watts` | Meter total stored with the split |
-| `refrigerator_watts`, `air_conditioner_watts`, `water_heater_watts`, `other_watts` | Non-negative, finite |
+| Column                                                                             | Notes                                                                    |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `reading_id`                                                                       | Primary key and foreign key to `energy_readings.id`, `ON DELETE CASCADE` |
+| `total_power_watts`                                                                | Meter total stored with the split                                        |
+| `refrigerator_watts`, `air_conditioner_watts`, `water_heater_watts`, `other_watts` | Non-negative, finite                                                     |
 
 A check requires the four appliance columns to sum to `total_power_watts` within `0.000001`.
 
@@ -262,9 +406,21 @@ Connection pooling differs by service:
 - Each processing attempt calls `asyncpg.create_pool` with `min_size=1` and `max_size=2`, then closes that pool.
 - Results calls `create_pool` once, with asyncpg's default size, and keeps it for the life of the process.
 
-## Scaling and Database Bottlenecks
+## Scaling
 
-PostgreSQL allows a limited number of clients at once (`max_connections`, 100 on a default server). Every open connection occupies one of those slots.
+More workers do not automatically mean more throughput. Each in-flight task needs a database connection, and PostgreSQL only accepts so many clients.
+
+```text
+Publish rate
+     ↓
+RabbitMQ queue
+     ↓
+Celery workers
+     ↓
+PostgreSQL connections
+     ↓
+Database becomes the bottleneck
+```
 
 ```text
 worker concurrency
@@ -278,7 +434,7 @@ other clients
 database pressure
 ```
 
-asyncpg's default pool opens 10 connections immediately. Several Celery child processes, each opening such a pool for an in-flight task, can pass `max_connections`. The server then refuses new clients with `sorry, too many clients already`. That error is classified as retryable, so the worker schedules another attempt and tries to open another pool. Retries do not add capacity when the limit is the number of connections.
+PostgreSQL's default `max_connections` is 100. Every open connection occupies one slot. asyncpg's default pool opens 10 connections immediately. Several Celery child processes, each opening such a pool for an in-flight task, can pass that limit. The server then refuses new clients with `sorry, too many clients already`. That error is classified as retryable, so the worker schedules another attempt and tries to open another pool. Retries do not add capacity when the limit is the number of connections.
 
 The processing pool is therefore capped at one or two connections. One task runs its queries sequentially; it does not need ten connections. Compose also fixes worker concurrency at 4, instead of Celery's default of one process per CPU. Four tasks at two connections each, plus the results pool, stay under a default `max_connections`. Raising `--concurrency` without raising that limit, or widening the per-task pool back to 10, recreates the refusal.
 
@@ -294,14 +450,14 @@ These are structural limits of this design. They are not a measured capacity for
 
 ## Observability
 
-| Signal | Name | Purpose |
-| --- | --- | --- |
-| HTTP latency | `energyflow_http_request_duration_seconds` | Time to answer `/readings` and `/results/{reading_id}` |
-| HTTP count | `energyflow_http_requests_total` | Responses by service, method, path, and status |
-| Publishes | `energyflow_readings_published_total` | Tasks successfully handed to the broker |
-| Task outcomes | `energyflow_tasks_total{outcome="success\|retry\|failure"}` | Worker results, including retries |
-| Task time | `energyflow_task_duration_seconds` | Time inside one attempt, including database work |
-| Lookups | `energyflow_result_lookups_total{outcome="hit\|miss"}` | Stored row versus `404` |
+| Signal        | Name                                                        | Purpose                                                |
+| ------------- | ----------------------------------------------------------- | ------------------------------------------------------ |
+| HTTP latency  | `energyflow_http_request_duration_seconds`                  | Time to answer `/readings` and `/results/{reading_id}` |
+| HTTP count    | `energyflow_http_requests_total`                            | Responses by service, method, path, and status         |
+| Publishes     | `energyflow_readings_published_total`                       | Tasks successfully handed to the broker                |
+| Task outcomes | `energyflow_tasks_total{outcome="success\|retry\|failure"}` | Worker results, including retries                      |
+| Task time     | `energyflow_task_duration_seconds`                          | Time inside one attempt, including database work       |
+| Lookups       | `energyflow_result_lookups_total{outcome="hit\|miss"}`      | Stored row versus `404`                                |
 
 `/health` and `/metrics` are omitted from the HTTP histogram so healthchecks do not dominate it. Result paths are labeled `/results/{reading_id}` so each UUID does not become its own series.
 
@@ -328,13 +484,13 @@ docker compose exec postgres psql -U energyflow -d energyflow -c \
 
 Healthchecks in Compose:
 
-| Service | Check |
-| --- | --- |
-| postgres | `pg_isready` |
-| rabbitmq | `rabbitmq-diagnostics ping` |
-| ingestion-service | `GET /health` on 8001 |
+| Service            | Check                                     |
+| ------------------ | ----------------------------------------- |
+| postgres           | `pg_isready`                              |
+| rabbitmq           | `rabbitmq-diagnostics ping`               |
+| ingestion-service  | `GET /health` on 8001                     |
 | processing-service | `GET /health` on 9100, after schema setup |
-| results-service | `GET /health` on 8003 |
+| results-service    | `GET /health` on 8003                     |
 
 `depends_on` waits for these checks. Ingestion waits for RabbitMQ. Processing waits for RabbitMQ and PostgreSQL. Results waits for PostgreSQL and a healthy worker.
 
@@ -372,7 +528,7 @@ POST /readings
        ↓
 GET /results/{id}
        ↓
-404                   the worker has not committed both rows
+404                   no row yet, or this id was never stored
        ↓
 worker finishes
        ↓
@@ -387,16 +543,16 @@ The gap can be too short to notice when a worker is idle, or long when the queue
 
 Tests live under `tests/` and use pytest. Async tests are enabled in `pyproject.toml`.
 
-| Area | What it covers |
-| --- | --- |
-| `tests/contracts` | `EnergyReading` validation |
-| `tests/ingestion` | Health, `202`, request id on the event, publish metric, `422` without publish |
-| `tests/processing` | Disaggregation, idempotent use case, retry classification, Celery settings |
-| `tests/results` | `200`, `404`, request id header |
-| `tests/integration` | PostgreSQL constraints and one processing-to-results read |
-| `tests/test_boundaries.py` | Services do not import each other's packages, and only processing contains `split_power` |
-| `tests/test_observability.py` | JSON log fields and metric path labels |
-| `tests/test_simulator.py` | Planned sensor ids and powers, without HTTP |
+| Area                          | What it covers                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------- |
+| `tests/contracts`             | `EnergyReading` validation                                                               |
+| `tests/ingestion`             | Health, `202`, request id on the event, publish metric, `422` without publish            |
+| `tests/processing`            | Disaggregation, idempotent use case, retry classification, Celery settings               |
+| `tests/results`               | `200`, `404`, request id header                                                          |
+| `tests/integration`           | PostgreSQL constraints and one processing-to-results read                                |
+| `tests/test_boundaries.py`    | Services do not import each other's packages, and only processing contains `split_power` |
+| `tests/test_observability.py` | JSON log fields and metric path labels                                                   |
+| `tests/test_simulator.py`     | Planned sensor ids and powers, without HTTP                                              |
 
 Integration tests are marked `integration` and need PostgreSQL. The default URL is `postgresql:///energyflow_test`, override with `ENERGYFLOW_DATABASE_URL`. They call the processing use case and repositories directly. They do not go through RabbitMQ.
 
@@ -419,13 +575,13 @@ python -m sensor_simulator --sensors 100 --readings-per-sensor 1 --concurrency 2
   --results-url http://127.0.0.1:8003
 ```
 
-| Flag | Meaning |
-| --- | --- |
-| `--sensors` | How many sensor ids to generate |
-| `--readings-per-sensor` | Posts per sensor |
-| `--concurrency` | How many POSTs run at once |
-| `--url` | Ingestion base URL, default `http://127.0.0.1:8001` |
-| `--results-url` | If set, poll one accepted id until `200` or timeout |
+| Flag                    | Meaning                                             |
+| ----------------------- | --------------------------------------------------- |
+| `--sensors`             | How many sensor ids to generate                     |
+| `--readings-per-sensor` | Posts per sensor                                    |
+| `--concurrency`         | How many POSTs run at once                          |
+| `--url`                 | Ingestion base URL, default `http://127.0.0.1:8001` |
+| `--results-url`         | If set, poll one accepted id until `200` or timeout |
 
 The report's latency numbers describe only those `POST`s:
 
@@ -444,10 +600,105 @@ python -m sensor_simulator --sensors 10000 --readings-per-sensor 1 --concurrency
 
 While it runs, watch `energyflow.tasks` and the task counters. Expect `202` responses before every corresponding `GET` returns `200`.
 
+## Design Decisions
+
+### Why FastAPI?
+
+The HTTP edge has to validate JSON and return `202`, `404`, or `422` without embedding Celery or SQL in the route. FastAPI plus Pydantic does that validation before the handler. The ingestion handler only publishes.
+
+The alternative was a single function that both served HTTP and disaggregated. That hides the queue. The trade-off is two HTTP code paths to deploy, and a results API that cannot see unpublished work.
+
+### Why async/await?
+
+Ingestion waits on publish, and the database calls are asyncpg. Those waits should yield the event loop. `split_power` stays synchronous and is moved to a thread, because it is CPU work, not I/O.
+
+Calling blocking `send_task` directly on the event loop would stall other requests in that process. The trade-off is a small thread hop on every accept.
+
+### Why RabbitMQ?
+
+Something has to hold the message between `202` and a worker that may be busy or restarting. A queue is that buffer. Celery's broker in this project is RabbitMQ.
+
+The alternative was processing inside the request. Then a slow database would slow every `POST`. The trade-off is operational: a broker to run, and a window where the result is not readable yet.
+
+### Why Celery?
+
+The worker needs a named task, retries with delay, and ack behavior when a process dies. Celery provides that on top of RabbitMQ. Ingestion only needs `send_task`, so it does not import the worker function.
+
+The alternative was a hand-written consumer. That would make retry and ack policy code this repository would have to own. The trade-off is Celery's process model: prefork children, a control queue that RabbitMQ 4 rejects unless it is exclusive, and metrics that must be aggregated across processes.
+
+### Why PostgreSQL?
+
+The split has to outlive the worker and be readable by another service, with a primary key and checks that the parts sum to the total. PostgreSQL is the system of record. asyncpg is the async driver.
+
+The alternative was keeping results in the worker's memory. A restart would drop them, and the results service could not see them. The trade-off is a shared schema between writer and reader, and connection limits that show up under concurrency.
+
+### Why these service boundaries?
+
+Ingestion, processing, and results change for different reasons and fail independently. A stopped worker does not stop `202` responses, as long as RabbitMQ is up. A stopped results API does not stop inserts.
+
+The alternative was one process with three modules. That is simpler to run and was an earlier shape of this codebase. The trade-off of the split is a shared database and a duplicated read query, instead of the results service importing the processing repositories.
+
+### Why Docker Compose?
+
+The demonstration needs five processes and stable hostnames. Compose provides the network, health-gated startup, and the published ports.
+
+A cluster scheduler would run the same processes. It would not change the per-task connection cost or the single queue. This Compose file is a local runtime: one replica of each service, no rolling deploy, and RabbitMQ without a data volume.
+
+### Why idempotency on `reading_id`?
+
+At-least-once delivery means the same task can run twice. The primary key and `ON CONFLICT DO NOTHING`, plus the "return the existing result" check, keep one logical reading as one row.
+
+The alternative was exactly-once delivery from the broker. This stack does not provide that. The trade-off is that a new HTTP request is always a new id, even when the sensor payload repeats.
+
+### Why retries with backoff?
+
+A dead connection or a deadlock may succeed on a later attempt. Immediate permanent failure would drop the reading. Five attempts with waits of 2, 4, 8, 16, and 32 seconds give the dependency time to return.
+
+The alternative was an infinite retry. That can pin a poison message and, in the too-many-clients case, keep opening pools. Invalid payloads are excluded so they do not use those attempts. The trade-off is that a task which exhausts retries is finished from the queue's point of view and is still absent from the database. The client is not notified, except by a continued `404`.
+
+## Trade-offs and Limitations
+
+This repository is a hands-on backend exercise. The boundaries and failure behavior are real. Several production concerns are intentionally out of scope.
+
+- **One PostgreSQL database** for the writer and the reader. The schema is the contract between them. A private database per service would remove that coupling and force another way to expose results.
+- **No authentication or authorization.** Any client that can reach the ports can post readings and read results.
+- **No cloud deployment, autoscaling, or Kubernetes.** Compose runs a single local copy of each service.
+- **RabbitMQ is local and has no Compose volume.** Recreating the broker container drops whatever is still queued.
+- **No outbox.** A crash after publish and before the `202` is written to the client is not coordinated with a database transaction, because ingestion has no database write.
+- **`404` is ambiguous** between "not processed yet" and "unknown id".
+- **The disaggregation model is fixed on/off wattages**, not a measured appliance signature from a real meter.
+- **Metrics are plain text endpoints.** Nothing in the repo scrapes them into Prometheus or draws them in Grafana.
+- **The results pool still uses asyncpg's default size.** Only the per-task processing pool is capped at 1–2 connections.
+- **Every task re-applies the schema** after opening its pool. That is simple and repetitive.
+- **Load numbers depend on the machine.** The simulator can drive 100 or 10,000 sensors. This README does not publish those runs as a capacity guarantee.
+- **No automated test drives the full broker path.** Confidence in RabbitMQ plus Celery comes from the worker configuration tests and from running Compose.
+
+These choices keep the system small enough to run and inspect. They are the wrong defaults for an internet-facing deployment.
+
+## What This Project Demonstrates
+
+- Python services with a shared event contract and separate application packages
+- Asynchronous HTTP accept with FastAPI, and explicit `202`, `404`, and `422`
+- Pydantic models at the boundary and in the disaggregation domain
+- `async`/`await` for broker and database waits, with CPU work moved to a thread
+- Background processing with Celery, and RabbitMQ as the buffer between accept and process
+- Retries with exponential backoff, and errors that must not be retried
+- Idempotent writes under at-least-once delivery
+- PostgreSQL constraints, a foreign key, an index, and asyncpg pools
+- How worker concurrency and pool size press against `max_connections`
+- Eventual consistency between `202` and a later `200`
+- Structured JSON logs and `X-Request-ID` / `correlation_id`
+- Application metrics for HTTP latency, publishes, task outcomes, and lookups
+- Docker Compose healthchecks and service DNS
+- pytest coverage of the domain, the HTTP edges, and PostgreSQL
+- A sensor simulator for a local concurrent load
+
 ## Project Structure
 
 ```text
 energy-flow/
+├── preview/
+│   └── banner.png
 ├── docker/
 │   ├── ingestion.Dockerfile
 │   ├── processing.Dockerfile
@@ -468,68 +719,9 @@ energy-flow/
 
 `energyflow_contracts` is shared on purpose. The three services do not import each other's application modules. Observability is also shared. It has no disaggregation or storage rules.
 
-## Running Locally
-
-Docker Compose is the way to run the full system. It builds three images from this repository and pulls `postgres:16-alpine` and `rabbitmq:4-management`.
-
-```bash
-docker compose up --build
-```
-
-Compose creates one network. Service names are hostnames on that network, so application URLs use `rabbitmq` and `postgres`, not `localhost`. Inside a container, `localhost` is that container.
-
-| From the host | Address |
-| --- | --- |
-| Ingestion | http://127.0.0.1:8001 |
-| Results | http://127.0.0.1:8003 |
-| Worker health and metrics | http://127.0.0.1:9100 |
-| RabbitMQ management | http://127.0.0.1:15672 |
-| PostgreSQL | `127.0.0.1:5433` |
-
-RabbitMQ credentials are `energyflow` / `energyflow`. The `guest` user only works from inside the broker container, so Compose does not use it. PostgreSQL uses the same user and password, database `energyflow`. The host port is **5433** so it does not collide with a PostgreSQL already listening on 5432. Inside the network the host is `postgres` and the port is 5432.
-
-Check the processes:
-
-```bash
-curl -s http://127.0.0.1:8001/health
-curl -s http://127.0.0.1:8003/health
-curl -s http://127.0.0.1:9100/health
-```
-
-Environment variables the processes actually read:
-
-| Variable | Compose value | Default outside Compose |
-| --- | --- | --- |
-| `ENERGYFLOW_RABBITMQ_URL` | `amqp://energyflow:energyflow@rabbitmq:5672/` | `amqp://guest:guest@127.0.0.1/` |
-| `ENERGYFLOW_DATABASE_URL` | `postgresql://energyflow:energyflow@postgres:5432/energyflow` | `postgresql:///energyflow_test` |
-| `ENERGYFLOW_METRICS_PORT` | `9100` on the worker | `9100` |
-| `PROMETHEUS_MULTIPROC_DIR` | `/tmp/prometheus` on the worker | unset |
-
-Stop the stack:
-
-```bash
-docker compose down
-```
-
-`docker compose down -v` also deletes the `energyflow-postgres` volume and the stored readings.
-
-### Run the processes yourself
-
-This needs a local PostgreSQL and RabbitMQ. The defaults above point at them. The Compose hostnames do not apply.
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e ".[dev]"
-
-uvicorn ingestion_service.app:app --port 8001
-uvicorn results_service.app:app --port 8003
-celery -A processing_service.worker:celery_app worker --loglevel=info
-```
-
-Optional: `uvicorn processing_service.health:app --port 8002` for the health-only app. The worker's own health port is 9100 once the worker is ready.
-
 ## API
+
+There is no authentication on any endpoint.
 
 ### Create a reading
 
@@ -586,107 +778,46 @@ After the worker stores the 1600 W example:
 
 ### Health and metrics
 
-| Method | URL |
-| --- | --- |
-| `GET` | http://127.0.0.1:8001/health |
-| `GET` | http://127.0.0.1:8001/metrics |
-| `GET` | http://127.0.0.1:8003/health |
-| `GET` | http://127.0.0.1:8003/metrics |
-| `GET` | http://127.0.0.1:9100/health |
-| `GET` | http://127.0.0.1:9100/metrics |
+| Method | URL                           |
+| ------ | ----------------------------- |
+| `GET`  | http://127.0.0.1:8001/health  |
+| `GET`  | http://127.0.0.1:8001/metrics |
+| `GET`  | http://127.0.0.1:8003/health  |
+| `GET`  | http://127.0.0.1:8003/metrics |
+| `GET`  | http://127.0.0.1:9100/health  |
+| `GET`  | http://127.0.0.1:9100/metrics |
 
-There is no authentication on any endpoint.
+## Development
 
-## Design Decisions
+### Environment variables
 
-### Why FastAPI?
+| Variable                   | Compose value                                                 | Default outside Compose         |
+| -------------------------- | ------------------------------------------------------------- | ------------------------------- |
+| `ENERGYFLOW_RABBITMQ_URL`  | `amqp://energyflow:energyflow@rabbitmq:5672/`                 | `amqp://guest:guest@127.0.0.1/` |
+| `ENERGYFLOW_DATABASE_URL`  | `postgresql://energyflow:energyflow@postgres:5432/energyflow` | `postgresql:///energyflow_test` |
+| `ENERGYFLOW_METRICS_PORT`  | `9100` on the worker                                          | `9100`                          |
+| `PROMETHEUS_MULTIPROC_DIR` | `/tmp/prometheus` on the worker                               | unset                           |
 
-The HTTP edge has to validate JSON and return `202`, `404`, or `422` without embedding Celery or SQL in the route. FastAPI plus Pydantic does that validation before the handler. The ingestion handler only publishes.
+### Run the processes yourself
 
-The alternative was a single function that both served HTTP and disaggregated. That hides the queue. The trade-off is two HTTP code paths to deploy, and a results API that cannot see unpublished work.
+This needs a local PostgreSQL and RabbitMQ. The defaults above point at them. The Compose hostnames do not apply.
 
-### Why async/await?
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
 
-Ingestion waits on publish, and the database calls are asyncpg. Those waits should yield the event loop. `split_power` stays synchronous and is moved to a thread, because it is CPU work, not I/O.
+uvicorn ingestion_service.app:app --port 8001
+uvicorn results_service.app:app --port 8003
+celery -A processing_service.worker:celery_app worker --loglevel=info
+```
 
-Calling blocking `send_task` directly on the event loop would stall other requests in that process. The trade-off is a small thread hop on every accept.
+Optional: `uvicorn processing_service.health:app --port 8002` for the health-only app. The worker's own health port is 9100 once the worker is ready.
 
-### Why RabbitMQ?
+## Shutdown
 
-Something has to hold the message between `202` and a worker that may be busy or restarting. A queue is that buffer. The project already uses Celery, and Celery's broker here is RabbitMQ.
+```bash
+docker compose down
+```
 
-The alternative was processing inside the request. Then a slow database would slow every `POST`. The trade-off is operational: a broker to run, and a window where the result is not readable yet.
-
-### Why Celery?
-
-The worker needs a named task, retries with delay, and ack behavior when a process dies. Celery provides that on top of RabbitMQ. Ingestion only needs `send_task`, so it does not import the worker function.
-
-The alternative was a hand-written consumer. That would make retry and ack policy code this repository would have to own. The trade-off is Celery's process model: prefork children, a control queue that RabbitMQ 4 rejects unless it is exclusive, and metrics that must be aggregated across processes.
-
-### Why PostgreSQL?
-
-The split has to outlive the worker and be readable by another service, with a primary key and checks that the parts sum to the total. PostgreSQL is the system of record. asyncpg is the async driver.
-
-The alternative was keeping results in the worker's memory. A restart would drop them, and the results service could not see them. The trade-off is a shared schema between writer and reader, and connection limits that show up under concurrency.
-
-### Why these service boundaries?
-
-Ingestion, processing, and results change for different reasons and fail independently. A stopped worker does not stop `202` responses, as long as RabbitMQ is up. A stopped results API does not stop inserts.
-
-The alternative was one process with three modules. That is simpler to run and was an earlier shape of this codebase. The trade-off of the split is a shared database and a duplicated read query, instead of the results service importing the processing repositories.
-
-### Why Docker Compose?
-
-The demonstration needs five processes and stable hostnames. Compose provides the network, health-gated startup, and the published ports.
-
-Kubernetes would schedule the same processes. It would not change the per-task connection cost or the single queue. The trade-off is that this Compose file is a local runtime: one replica of each service, no rolling deploy, and RabbitMQ without a data volume.
-
-### Why idempotency on `reading_id`?
-
-At-least-once delivery means the same task can run twice. The primary key and `ON CONFLICT DO NOTHING`, plus the "return the existing result" check, keep one logical reading as one row.
-
-The alternative was exactly-once delivery from the broker. This stack does not provide that. The trade-off is that a new HTTP request is always a new id, even when the sensor payload repeats.
-
-### Why retries with backoff?
-
-A dead connection or a deadlock may succeed on a later attempt. Immediate permanent failure would drop the reading. Five attempts with waits of 2, 4, 8, 16, and 32 seconds give the dependency time to return.
-
-The alternative was an infinite retry. That can pin a poison message and, in the too-many-clients case, keep opening pools. Invalid payloads are excluded so they do not use those attempts. The trade-off is that a task which exhausts retries is finished from the queue's point of view and is still absent from the database. The client is not notified, except by a continued `404`.
-
-## Trade-offs and Limitations
-
-This repository is a hands-on backend exercise. The boundaries and failure behavior are real. Several production concerns are intentionally out of scope.
-
-- **One PostgreSQL database** for the writer and the reader. The schema is the contract between them. A private database per service would remove that coupling and force another way to expose results.
-- **No authentication or authorization.** Any client that can reach the ports can post readings and read results.
-- **No cloud deployment, autoscaling, or Kubernetes.** Compose runs a single local copy of each service.
-- **RabbitMQ is local and has no Compose volume.** Recreating the broker container drops whatever is still queued.
-- **No outbox.** A crash after publish and before the `202` is written to the client is not coordinated with a database transaction, because ingestion has no database write.
-- **`404` is ambiguous** between "not processed yet" and "unknown id".
-- **The disaggregation model is fixed on/off wattages**, not a measured appliance signature from a real meter.
-- **Metrics are plain text endpoints.** Nothing in the repo scrapes them into Prometheus or draws them in Grafana.
-- **The results pool still uses asyncpg's default size.** Only the per-task processing pool is capped at 1–2 connections.
-- **Every task re-applies the schema** after opening its pool. That is simple and repetitive.
-- **Load numbers depend on the machine.** The simulator can drive 100 or 10,000 sensors. This README does not publish those runs as a capacity guarantee.
-- **No automated test drives the full broker path.** Confidence in RabbitMQ plus Celery comes from the worker configuration tests and from running Compose.
-
-These choices keep the system small enough to run and inspect. They are the wrong defaults for an internet-facing deployment.
-
-## Engineering Concepts Demonstrated
-
-- Python services with a shared contract and separate application packages
-- FastAPI request validation and explicit status codes
-- Pydantic models at the boundary and in the disaggregation domain
-- `async`/`await` for broker and database waits, with CPU work moved to a thread
-- A Celery task as the unit of background work
-- RabbitMQ as the buffer between accept and process
-- PostgreSQL constraints, a foreign key, and an index
-- Connection pooling and the interaction with `max_connections`
-- Retries with exponential backoff, and errors that must not be retried
-- Idempotent writes under at-least-once delivery
-- Eventual consistency between `202` and a later `200`
-- JSON logs and `X-Request-ID` / `correlation_id`
-- Application metrics for HTTP latency, publishes, task outcomes, and lookups
-- Docker Compose healthchecks and service DNS
-- pytest coverage of the domain, the HTTP edges, and PostgreSQL
-- A sensor simulator for a local concurrent load
+`docker compose down -v` also deletes the `energyflow-postgres` volume and the stored readings. RabbitMQ has no volume in this Compose file, so `down` already drops whatever is still queued when that container is removed.
