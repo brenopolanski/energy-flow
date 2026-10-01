@@ -859,3 +859,7 @@ docker compose down
 ```
 
 `docker compose down -v` also deletes the `energyflow-postgres` volume and the stored readings. RabbitMQ has no volume in this Compose file, so `down` already drops whatever is still queued when that container is removed.
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](./LICENSE) file for details.
