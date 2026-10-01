@@ -7,8 +7,12 @@ from uuid import UUID
 
 import asyncpg
 
+from energyflow.disaggregation import DisaggregatedPower, DisaggregatedReading
 from energyflow.models import EnergyReading
 from energyflow.persistence.repository import StoredEnergyReading
+from energyflow.persistence.results import StoredDisaggregation
+
+DEFAULT_DATABASE_URL = "postgresql:///energyflow_test"
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
@@ -95,4 +99,106 @@ def _to_reading(row: asyncpg.Record) -> StoredEnergyReading:
         sensor_id=row["sensor_id"],
         timestamp=row["recorded_at"],
         power_watts=row["power_watts"],
+    )
+
+
+_INSERT_RESULT = """
+INSERT INTO disaggregation_results (
+    reading_id,
+    total_power_watts,
+    refrigerator_watts,
+    air_conditioner_watts,
+    water_heater_watts,
+    other_watts
+)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (reading_id) DO NOTHING
+RETURNING
+    reading_id,
+    total_power_watts,
+    refrigerator_watts,
+    air_conditioner_watts,
+    water_heater_watts,
+    other_watts
+"""
+
+_SELECT_RESULT = """
+SELECT
+    reading.id,
+    reading.sensor_id,
+    reading.recorded_at,
+    result.total_power_watts,
+    result.refrigerator_watts,
+    result.air_conditioner_watts,
+    result.water_heater_watts,
+    result.other_watts
+FROM disaggregation_results AS result
+JOIN energy_readings AS reading ON reading.id = result.reading_id
+WHERE result.reading_id = $1
+"""
+
+
+class PostgresDisaggregationResultRepository:
+    """Stores one appliance split per reading."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def find_by_reading_id(self, reading_id: UUID) -> StoredDisaggregation | None:
+        row = await self._pool.fetchrow(_SELECT_RESULT, reading_id)
+        if row is None:
+            return None
+        return _to_result(row)
+
+    async def save(
+        self,
+        reading_id: UUID,
+        result: DisaggregatedReading,
+    ) -> StoredDisaggregation:
+        breakdown = result.breakdown
+        inserted = await self._pool.fetchrow(
+            _INSERT_RESULT,
+            reading_id,
+            breakdown.total_power_watts,
+            breakdown.refrigerator_watts,
+            breakdown.air_conditioner_watts,
+            breakdown.water_heater_watts,
+            breakdown.other_watts,
+        )
+        if inserted is not None:
+            return _stored_from_insert(result, inserted)
+        existing = await self.find_by_reading_id(reading_id)
+        if existing is None:
+            raise RuntimeError(f"disaggregation for {reading_id} disappeared during save")
+        return existing
+
+
+def _stored_from_insert(
+    result: DisaggregatedReading,
+    row: asyncpg.Record,
+) -> StoredDisaggregation:
+    return StoredDisaggregation(
+        reading_id=row["reading_id"],
+        sensor_id=result.sensor_id,
+        timestamp=result.timestamp,
+        breakdown=_breakdown(row),
+    )
+
+
+def _to_result(row: asyncpg.Record) -> StoredDisaggregation:
+    return StoredDisaggregation(
+        reading_id=row["id"],
+        sensor_id=row["sensor_id"],
+        timestamp=row["recorded_at"],
+        breakdown=_breakdown(row),
+    )
+
+
+def _breakdown(row: asyncpg.Record) -> DisaggregatedPower:
+    return DisaggregatedPower(
+        total_power_watts=row["total_power_watts"],
+        refrigerator_watts=row["refrigerator_watts"],
+        air_conditioner_watts=row["air_conditioner_watts"],
+        water_heater_watts=row["water_heater_watts"],
+        other_watts=row["other_watts"],
     )

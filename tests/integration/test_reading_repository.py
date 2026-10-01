@@ -30,7 +30,7 @@ async def pool():
     except (OSError, asyncpg.PostgresError) as exc:
         pytest.skip(f"PostgreSQL is not available: {exc}")
     async with opened.acquire() as connection:
-        await connection.execute("TRUNCATE energy_readings")
+        await connection.execute("TRUNCATE disaggregation_results, energy_readings")
     try:
         yield opened
     finally:

@@ -8,5 +8,14 @@ from energyflow.persistence.repository import (
     EnergyReadingRepository,
     StoredEnergyReading,
 )
+from energyflow.persistence.results import (
+    DisaggregationResultRepository,
+    StoredDisaggregation,
+)
 
-__all__ = ["EnergyReadingRepository", "StoredEnergyReading"]
+__all__ = [
+    "DisaggregationResultRepository",
+    "EnergyReadingRepository",
+    "StoredDisaggregation",
+    "StoredEnergyReading",
+]

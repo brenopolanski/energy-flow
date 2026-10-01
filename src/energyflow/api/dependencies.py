@@ -1,14 +1,14 @@
-"""How routes obtain the application service and the event publisher."""
+"""How routes obtain the reading repository and the job dispatcher."""
 
 from fastapi import Request
 
-from energyflow.disaggregation import EnergyDisaggregationService
-from energyflow.messaging.publisher import ReadingEventPublisher
+from energyflow.jobs import ReadingJobDispatcher
+from energyflow.persistence.repository import EnergyReadingRepository
 
 
-def get_disaggregation_service() -> EnergyDisaggregationService:
-    return EnergyDisaggregationService()
+def get_reading_repository(request: Request) -> EnergyReadingRepository:
+    return request.app.state.readings
 
 
-def get_reading_publisher(request: Request) -> ReadingEventPublisher:
-    return request.app.state.publisher
+def get_job_dispatcher(request: Request) -> ReadingJobDispatcher:
+    return request.app.state.jobs

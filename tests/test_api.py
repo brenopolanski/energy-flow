@@ -1,8 +1,12 @@
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
 from energyflow.api.app import create_app
 from energyflow.models import EnergyReading
+from energyflow.persistence.repository import StoredEnergyReading
 
 VALID_READING = {
     "sensor_id": "sensor-001",
@@ -11,22 +15,51 @@ VALID_READING = {
 }
 
 
-class RecordingPublisher:
+class MemoryReadings:
     def __init__(self) -> None:
-        self.readings: list[EnergyReading] = []
+        self.saved: list[StoredEnergyReading] = []
 
-    async def publish_reading_accepted(self, reading: EnergyReading) -> None:
-        self.readings.append(reading)
+    async def save(self, reading: EnergyReading) -> StoredEnergyReading:
+        stored = StoredEnergyReading(
+            id=uuid4(),
+            sensor_id=reading.sensor_id,
+            timestamp=reading.timestamp,
+            power_watts=reading.power_watts,
+        )
+        self.saved.append(stored)
+        return stored
+
+    async def find_by_id(self, reading_id: UUID) -> StoredEnergyReading | None:
+        for stored in self.saved:
+            if stored.id == reading_id:
+                return stored
+        return None
+
+    async def list_by_sensor(self, sensor_id: str) -> list[StoredEnergyReading]:
+        return [stored for stored in self.saved if stored.sensor_id == sensor_id]
+
+
+class MemoryJobs:
+    def __init__(self) -> None:
+        self.reading_ids: list[UUID] = []
+
+    async def dispatch(self, reading_id: UUID) -> None:
+        self.reading_ids.append(reading_id)
 
 
 @pytest.fixture
-def publisher() -> RecordingPublisher:
-    return RecordingPublisher()
+def readings() -> MemoryReadings:
+    return MemoryReadings()
 
 
 @pytest.fixture
-def client(publisher: RecordingPublisher) -> TestClient:
-    return TestClient(create_app(publisher=publisher))
+def jobs() -> MemoryJobs:
+    return MemoryJobs()
+
+
+@pytest.fixture
+def client(readings: MemoryReadings, jobs: MemoryJobs) -> TestClient:
+    return TestClient(create_app(readings=readings, jobs=jobs))
 
 
 def test_health(client: TestClient) -> None:
@@ -36,50 +69,28 @@ def test_health(client: TestClient) -> None:
     assert response.json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize(
-    ("power_watts", "breakdown"),
-    [
-        (
-            1600,
-            {
-                "total_power_watts": 1600.0,
-                "refrigerator_watts": 0.0,
-                "air_conditioner_watts": 1500.0,
-                "water_heater_watts": 0.0,
-                "other_watts": 100.0,
-            },
-        ),
-        (
-            6150,
-            {
-                "total_power_watts": 6150.0,
-                "refrigerator_watts": 150.0,
-                "air_conditioner_watts": 1500.0,
-                "water_heater_watts": 4500.0,
-                "other_watts": 0.0,
-            },
-        ),
-    ],
-)
-def test_post_reading_returns_disaggregation(
-    client: TestClient,
-    publisher: RecordingPublisher,
-    power_watts: float,
-    breakdown: dict[str, float],
-) -> None:
-    response = client.post(
-        "/readings",
-        json={**VALID_READING, "power_watts": power_watts},
-    )
+def test_create_app_requires_readings_and_jobs_together(readings: MemoryReadings) -> None:
+    with pytest.raises(ValueError):
+        create_app(readings=readings)
 
-    assert response.status_code == 200
+
+def test_post_reading_stores_and_enqueues(
+    client: TestClient,
+    readings: MemoryReadings,
+    jobs: MemoryJobs,
+) -> None:
+    response = client.post("/readings", json=VALID_READING)
+
+    assert response.status_code == 202
     body = response.json()
     assert body["sensor_id"] == "sensor-001"
     assert body["timestamp"] == "2026-09-29T10:00:00Z"
-    assert body["breakdown"] == breakdown
-    assert len(publisher.readings) == 1
-    assert publisher.readings[0].sensor_id == "sensor-001"
-    assert publisher.readings[0].power_watts == power_watts
+    assert body["power_watts"] == 1600.0
+    assert body["status"] == "accepted"
+    assert len(readings.saved) == 1
+    assert jobs.reading_ids == [readings.saved[0].id]
+    assert body["id"] == str(readings.saved[0].id)
+    assert readings.saved[0].timestamp == datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize(
@@ -114,10 +125,12 @@ def test_post_reading_returns_disaggregation(
 )
 def test_post_reading_rejects_invalid_body(
     client: TestClient,
-    publisher: RecordingPublisher,
+    readings: MemoryReadings,
+    jobs: MemoryJobs,
     payload: dict[str, object],
 ) -> None:
     response = client.post("/readings", json=payload)
 
     assert response.status_code == 422
-    assert publisher.readings == []
+    assert readings.saved == []
+    assert jobs.reading_ids == []

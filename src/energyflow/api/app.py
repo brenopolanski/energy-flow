@@ -7,31 +7,43 @@ from fastapi import FastAPI
 
 from energyflow import __version__
 from energyflow.api.routes import router
-from energyflow.messaging.publisher import ReadingEventPublisher
-from energyflow.messaging.rabbitmq import DEFAULT_URL, connect, open_publisher
+from energyflow.jobs import ReadingJobDispatcher
+from energyflow.persistence.postgres import (
+    DEFAULT_DATABASE_URL,
+    PostgresEnergyReadingRepository,
+    connect,
+)
+from energyflow.persistence.repository import EnergyReadingRepository
+from energyflow.worker import CeleryReadingJobDispatcher
 
 
 @asynccontextmanager
-async def rabbitmq_lifespan(app: FastAPI):
-    url = os.environ.get("ENERGYFLOW_RABBITMQ_URL", DEFAULT_URL)
-    connection = await connect(url)
-    channel = await connection.channel()
-    app.state.publisher = await open_publisher(channel)
+async def lifespan(app: FastAPI):
+    database_url = os.environ.get("ENERGYFLOW_DATABASE_URL", DEFAULT_DATABASE_URL)
+    pool = await connect(database_url)
+    app.state.readings = PostgresEnergyReadingRepository(pool)
+    app.state.jobs = CeleryReadingJobDispatcher()
     try:
         yield
     finally:
-        await connection.close()
+        await pool.close()
 
 
-def create_app(publisher: ReadingEventPublisher | None = None) -> FastAPI:
+def create_app(
+    readings: EnergyReadingRepository | None = None,
+    jobs: ReadingJobDispatcher | None = None,
+) -> FastAPI:
+    if (readings is None) != (jobs is None):
+        raise ValueError("readings and jobs must be provided together")
     app = FastAPI(
         title="EnergyFlow",
         version=__version__,
-        lifespan=None if publisher is not None else rabbitmq_lifespan,
+        lifespan=None if readings is not None else lifespan,
     )
     app.include_router(router)
-    if publisher is not None:
-        app.state.publisher = publisher
+    if readings is not None and jobs is not None:
+        app.state.readings = readings
+        app.state.jobs = jobs
     return app
 
 

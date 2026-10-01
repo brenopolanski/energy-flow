@@ -1,26 +1,34 @@
-"""HTTP routes. Each handler validates input, calls a service, and returns."""
+"""HTTP routes. Each handler validates input, calls a port, and returns."""
 
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel
 
-from energyflow.api.dependencies import get_disaggregation_service, get_reading_publisher
-from energyflow.disaggregation import DisaggregatedReading, EnergyDisaggregationService
-from energyflow.messaging.publisher import ReadingEventPublisher
-from energyflow.models import EnergyReading
+from energyflow.api.dependencies import get_job_dispatcher, get_reading_repository
+from energyflow.jobs import ReadingJobDispatcher
+from energyflow.models import EnergyReading, SensorId
+from energyflow.persistence.repository import EnergyReadingRepository
 
 router = APIRouter()
 
-DisaggregationService = Annotated[
-    EnergyDisaggregationService,
-    Depends(get_disaggregation_service),
-]
-ReadingPublisher = Annotated[ReadingEventPublisher, Depends(get_reading_publisher)]
+Readings = Annotated[EnergyReadingRepository, Depends(get_reading_repository)]
+Jobs = Annotated[ReadingJobDispatcher, Depends(get_job_dispatcher)]
 
 
 class HealthResponse(BaseModel):
     status: str
+
+
+class AcceptedReading(BaseModel):
+    """A reading that was stored and queued for background processing."""
+
+    id: UUID
+    sensor_id: SensorId
+    timestamp: AwareDatetime
+    power_watts: float
+    status: Literal["accepted"] = "accepted"
 
 
 @router.get("/health", response_model=HealthResponse, status_code=status.HTTP_200_OK)
@@ -30,14 +38,19 @@ def health() -> HealthResponse:
 
 @router.post(
     "/readings",
-    response_model=DisaggregatedReading,
-    status_code=status.HTTP_200_OK,
+    response_model=AcceptedReading,
+    status_code=status.HTTP_202_ACCEPTED,
 )
-async def process_reading(
+async def accept_reading(
     reading: EnergyReading,
-    service: DisaggregationService,
-    publisher: ReadingPublisher,
-) -> DisaggregatedReading:
-    result = await service.disaggregate(reading)
-    await publisher.publish_reading_accepted(reading)
-    return result
+    readings: Readings,
+    jobs: Jobs,
+) -> AcceptedReading:
+    stored = await readings.save(reading)
+    await jobs.dispatch(stored.id)
+    return AcceptedReading(
+        id=stored.id,
+        sensor_id=stored.sensor_id,
+        timestamp=stored.timestamp,
+        power_watts=stored.power_watts,
+    )
