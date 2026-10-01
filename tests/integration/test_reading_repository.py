@@ -12,8 +12,8 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from energyflow.models import EnergyReading
-from energyflow.persistence.postgres import PostgresEnergyReadingRepository, connect
+from energyflow_contracts.readings import EnergyReading
+from processing_service.persistence.postgres import PostgresEnergyReadingRepository, connect
 
 pytestmark = pytest.mark.integration
 

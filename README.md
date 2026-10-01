@@ -2,11 +2,38 @@
 
 EnergyFlow is a toy distributed energy-data processing system. It is a learning project and will be built in small stages.
 
-The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, a FastAPI application, a PostgreSQL repository, a RabbitMQ publisher/consumer, and a Celery worker. `POST /readings` stores the reading and enqueues `energyflow.process_energy_reading`. The worker loads that row, validates it, runs disaggregation, and stores one result. RabbitMQ is the Celery broker. The task queue is `energyflow.tasks`, separate from the `energy_readings` queue.
+Stage 9 splits the system into three services. They do not import each other's application code. The shared package `energyflow_contracts` holds the reading model and the `ReadingAccepted` event.
+
+```text
+sensor
+  ↓ HTTP
+ingestion-service          FastAPI :8001
+  validate EnergyReading
+  publish ReadingAccepted
+  ↓
+RabbitMQ                   queue energyflow.tasks
+  task energyflow.readings.process
+  ↓
+processing-service         Celery worker
+  disaggregate
+  store energy_readings
+  store disaggregation_results
+  ↓
+PostgreSQL
+  ↑
+results-service            FastAPI :8003
+  GET /results/{reading_id}
+```
+
+Ingestion does not store the split and does not run disaggregation. Processing does not accept HTTP readings. Results does not publish events. Processing and results share one PostgreSQL database: processing writes, results reads. That is a schema coupling, chosen instead of a second database.
+
+Kubernetes is not part of this stage.
 
 ## Requirements
 
 - Python 3.12 or newer
+- PostgreSQL for stored results
+- RabbitMQ for the Celery broker
 
 ## Setup
 
@@ -30,33 +57,21 @@ PostgreSQL integration tests use `ENERGYFLOW_DATABASE_URL`. The default is `post
 pytest -m integration
 ```
 
-RabbitMQ tests use `ENERGYFLOW_RABBITMQ_URL`. The default is `amqp://guest:guest@127.0.0.1/`.
+## Run
+
+Broker URL: `ENERGYFLOW_RABBITMQ_URL` (default `amqp://guest:guest@127.0.0.1/`).
+
+Database URL: `ENERGYFLOW_DATABASE_URL` (default `postgresql:///energyflow_test`).
 
 ```bash
-pytest -m rabbitmq
+uvicorn ingestion_service.app:app --port 8001
+uvicorn processing_service.health:app --port 8002
+uvicorn results_service.app:app --port 8003
+celery -A processing_service.worker:celery_app worker --loglevel=info
 ```
 
-The stage 7 consumer listens on the `energy_readings` queue. `POST /readings` does not publish to that queue anymore:
+- `GET /health` on each HTTP process
+- `POST /readings` on ingestion returns `202 Accepted` with the reading id
+- `GET /results/{reading_id}` on the results service returns the stored split, or `404` when it is not stored yet
 
-```bash
-python -m energyflow.messaging
-```
-
-## Worker
-
-Celery uses `ENERGYFLOW_RABBITMQ_URL` (default `amqp://guest:guest@127.0.0.1/`) and stores results with `ENERGYFLOW_DATABASE_URL` (default `postgresql:///energyflow_test`).
-
-```bash
-celery -A energyflow.worker:celery_app worker --loglevel=info
-```
-
-A stored result is keyed by the reading id. Running the task again returns that row. A missing reading, an invalid id, or a row that fails validation is a permanent failure. Connection and deadlock failures retry up to 5 times, waiting 2, 4, 8, 16, then 32 seconds.
-
-## API
-
-```bash
-uvicorn energyflow.api.app:app --port 8000
-```
-
-- `GET /health`
-- `POST /readings` stores the reading and returns `202 Accepted` with its id. Disaggregation runs in the worker.
+The worker retries connection, deadlock, and shutdown failures up to 5 times, waiting 2, 4, 8, 16, then 32 seconds. An invalid event is not retried. A repeated event for the same reading id keeps the first stored split.
