@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -6,6 +7,7 @@ from pydantic import ValidationError
 from energyflow.disaggregation import (
     ApplianceSignature,
     DisaggregatedPower,
+    DisaggregatedReading,
     DisaggregationInput,
     EnergyDisaggregationService,
     split_power,
@@ -138,6 +140,18 @@ def test_rejects_negative_appliance_estimate() -> None:
         )
 
 
+def _disaggregate(
+    reading: EnergyReading,
+    signature: ApplianceSignature | None = None,
+) -> DisaggregatedReading:
+    service = (
+        EnergyDisaggregationService()
+        if signature is None
+        else EnergyDisaggregationService(signature)
+    )
+    return asyncio.run(service.disaggregate(reading))
+
+
 def test_service_attaches_the_split_to_the_reading() -> None:
     reading = EnergyReading(
         sensor_id="meter-1",
@@ -145,7 +159,7 @@ def test_service_attaches_the_split_to_the_reading() -> None:
         power_watts=1_650,
     )
 
-    result = EnergyDisaggregationService().disaggregate(reading)
+    result = _disaggregate(reading)
 
     assert result.sensor_id == "meter-1"
     assert result.timestamp == TIMESTAMP
@@ -164,7 +178,7 @@ def test_service_uses_the_injected_signature() -> None:
         water_heater_watts=20,
     )
 
-    result = EnergyDisaggregationService(signature).disaggregate(reading)
+    result = _disaggregate(reading, signature)
 
     assert result.breakdown.refrigerator_watts == 40
     assert result.breakdown.air_conditioner_watts == 30
@@ -180,4 +194,29 @@ def test_service_rejects_non_finite_power_on_the_reading() -> None:
     )
 
     with pytest.raises(ValidationError):
-        EnergyDisaggregationService().disaggregate(reading)
+        _disaggregate(reading)
+
+
+def test_disaggregate_awaits_concurrent_readings() -> None:
+    service = EnergyDisaggregationService()
+    low = EnergyReading(
+        sensor_id="meter-1",
+        timestamp=TIMESTAMP,
+        power_watts=1_600,
+    )
+    high = EnergyReading(
+        sensor_id="meter-2",
+        timestamp=TIMESTAMP,
+        power_watts=6_150,
+    )
+
+    async def run() -> tuple[DisaggregatedReading, DisaggregatedReading]:
+        return await asyncio.gather(
+            service.disaggregate(low),
+            service.disaggregate(high),
+        )
+
+    first, second = asyncio.run(run())
+
+    assert first.breakdown == _split(1_600)
+    assert second.breakdown == _split(6_150)

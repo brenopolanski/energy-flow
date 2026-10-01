@@ -31,8 +31,8 @@ def health() -> HealthResponse:
     response_model=DisaggregatedReading,
     status_code=status.HTTP_200_OK,
 )
-def process_reading(
+async def process_reading(
     reading: EnergyReading,
     service: DisaggregationService,
 ) -> DisaggregatedReading:
-    return service.disaggregate(reading)
+    return await service.disaggregate(reading)

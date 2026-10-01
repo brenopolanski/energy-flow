@@ -11,6 +11,7 @@ explain the same power, the lowest bitmask wins: refrigerator is preferred,
 then air conditioner, then water heater.
 """
 
+import asyncio
 import math
 from typing import Annotated, Self
 
@@ -128,16 +129,18 @@ def split_power(
 
 
 class EnergyDisaggregationService:
-    """Turn a meter reading into an appliance-level power estimate."""
+    """Turn a meter reading into an appliance-level power estimate.
+
+    ``split_power`` stays synchronous. It runs on a worker thread so this
+    method can be awaited without blocking the event loop.
+    """
 
     def __init__(self, signature: ApplianceSignature = DEFAULT_SIGNATURE) -> None:
         self._signature = signature
 
-    def disaggregate(self, reading: EnergyReading) -> DisaggregatedReading:
-        breakdown = split_power(
-            DisaggregationInput(total_power_watts=reading.power_watts),
-            self._signature,
-        )
+    async def disaggregate(self, reading: EnergyReading) -> DisaggregatedReading:
+        sample = DisaggregationInput(total_power_watts=reading.power_watts)
+        breakdown = await asyncio.to_thread(split_power, sample, self._signature)
         return DisaggregatedReading(
             sensor_id=reading.sensor_id,
             timestamp=reading.timestamp,

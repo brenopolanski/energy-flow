@@ -2,7 +2,7 @@
 
 EnergyFlow is a toy distributed energy-data processing system. It is a learning project and will be built in small stages.
 
-The project currently contains the Python skeleton, an `EnergyReading` domain model, a pure disaggregation service, and a FastAPI application. `POST /readings` validates a reading and returns the appliance split. Later stages will add background jobs, messaging, and a database.
+The project currently contains the Python skeleton, an `EnergyReading` domain model, a disaggregation service, and a FastAPI application. `POST /readings` awaits the service. The appliance split itself stays synchronous. Later stages will add background jobs, messaging, and a database.
 
 ## Requirements
 
