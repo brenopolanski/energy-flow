@@ -1,5 +1,3 @@
-# :zap: EnergyFlow
-
 <p align="center">
   <img src="preview/banner.png" alt="EnergyFlow" />
 </p>
